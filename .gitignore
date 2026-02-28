@@ -169,6 +169,7 @@ cython_debug/
 /backend/src/module/debug_run.sh
 /backend/src/module/__version__.py
 /backend/src/data/
+/backend/src/data
 
 /src/module/conf/config_dev.ini
 
@@ -176,6 +177,7 @@ cython_debug/
 .run
 /backend/src/templates/
 /backend/src/config/
+/backend/src/config
 /src/debuger.py
 /backend/src/dist.zip
 /pyrightconfig.json
