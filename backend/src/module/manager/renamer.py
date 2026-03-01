@@ -14,6 +14,9 @@ logger = logging.getLogger(__name__)
 # Key: (torrent_hash, old_path, new_path), Value: timestamp of last attempt
 # This prevents spamming the same rename when qBittorrent returns 200 but doesn't actually rename
 _pending_renames: dict[tuple[str, str, str], float] = {}
+# Track (episode_offset, original_episode) pairs that already triggered a bad-offset warning
+# so we only log it once per combination instead of every rename cycle
+_warned_bad_offsets: set[tuple[int, int]] = set()
 _PENDING_RENAME_COOLDOWN = 300  # 5 minutes cooldown before retrying same rename
 _CLEANUP_INTERVAL = 60  # Clean up pending cache at most once per minute
 _last_cleanup_time: float = 0
@@ -74,9 +77,12 @@ class Renamer(DownloadClient):
         # is almost always a misconfiguration, so revert to original.
         if adjusted_episode < 0 or (adjusted_episode == 0 and original_episode > 0):
             adjusted_episode = original_episode
-            logger.warning(
-                f"[Renamer] Episode offset {episode_offset} would make episode {original_episode} non-positive, ignoring offset"
-            )
+            warning_key = (episode_offset, original_episode)
+            if warning_key not in _warned_bad_offsets:
+                _warned_bad_offsets.add(warning_key)
+                logger.warning(
+                    f"[Renamer] Episode offset {episode_offset} would make episode {original_episode} non-positive, ignoring offset"
+                )
         episode = f"0{adjusted_episode}" if adjusted_episode < 10 else adjusted_episode
         if method == "none" or method == "subtitle_none":
             return file_info.media_path
