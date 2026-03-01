@@ -7,6 +7,7 @@ from module.conf import VERSION
 from module.downloader import DownloadClient
 from module.manager import SeasonCollector, TorrentManager
 from module.models import Bangumi, BangumiUpdate, RSSItem
+from module.parser.analyser.tmdb_parser import tmdb_parser
 from module.rss import RSSAnalyser, RSSEngine
 from module.searcher import SearchTorrent
 
@@ -169,6 +170,49 @@ TOOLS = [
             "required": ["id"],
         },
     ),
+    types.Tool(
+        name="get_anime_info",
+        description=(
+            "Look up an anime title on TMDB to get metadata: official title, "
+            "season count, latest season, airing status, overview, and poster. "
+            "Useful for checking details before subscribing."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Anime title to search (Japanese, Chinese or English)",
+                },
+                "language": {
+                    "type": "string",
+                    "description": "Preferred language for returned metadata",
+                    "enum": ["zh", "jp", "en"],
+                    "default": "zh",
+                },
+            },
+            "required": ["title"],
+        },
+    ),
+    types.Tool(
+        name="diagnose_subscription",
+        description=(
+            "Diagnose a subscription to identify potential problems: "
+            "checks whether the RSS feed is reachable, whether any recent "
+            "downloads exist, whether the subscription is active, and "
+            "whether it has been flagged for review."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "integer",
+                    "description": "The anime/bangumi ID to diagnose",
+                },
+            },
+            "required": ["id"],
+        },
+    ),
 ]
 
 
@@ -231,6 +275,10 @@ async def _dispatch(name: str, args: dict) -> dict | list:
         return await _refresh_feeds()
     elif name == "update_anime":
         return await _update_anime(args)
+    elif name == "get_anime_info":
+        return await _get_anime_info(args["title"], args.get("language", "zh"))
+    elif name == "diagnose_subscription":
+        return await _diagnose_subscription(args["id"])
     else:
         return {"error": f"Unknown tool: {name}"}
 
@@ -357,3 +405,67 @@ async def _update_anime(args: dict) -> dict:
 
         resp = await manager.update_rule(bangumi_id, update_data)
     return {"status": resp.status, "message": resp.msg_en}
+
+
+async def _get_anime_info(title: str, language: str) -> dict:
+    info = await tmdb_parser(title, language)
+    if info is None:
+        return {"error": f"No TMDB result found for '{title}'"}
+    return {
+        "id": info.id,
+        "title": info.title,
+        "original_title": info.original_title,
+        "year": info.year,
+        "last_season": info.last_season,
+        "season_count": len([s for s in info.season if s.get("season") != "Specials"]),
+        "series_status": info.series_status,
+        "poster_link": info.poster_link,
+        "season_episode_counts": info.season_episode_counts,
+    }
+
+
+async def _diagnose_subscription(bangumi_id: int) -> dict:
+    with TorrentManager() as manager:
+        bangumi = manager.bangumi.search_id(bangumi_id)
+        if not bangumi:
+            return {"error": f"Anime with id {bangumi_id} not found"}
+
+        recent_torrents = manager.torrent.search_all_by_bangumi_id(bangumi_id)
+
+    issues = []
+    suggestions = []
+
+    if bangumi.deleted:
+        issues.append("Subscription has been deleted")
+    if bangumi.archived:
+        issues.append("Subscription is archived")
+    if not bangumi.added:
+        issues.append("Subscription is disabled (added=False)")
+        suggestions.append("Re-enable the subscription in the WebUI")
+
+    # Check RSS feed health
+    with RSSEngine() as engine:
+        rss_items = engine.rss.search_all()
+    matching_rss = [r for r in rss_items if bangumi.rss_link and r.url == bangumi.rss_link]
+    if not matching_rss:
+        issues.append("RSS feed not found in feed list")
+        suggestions.append("Check that the RSS link is still valid")
+    else:
+        rss = matching_rss[0]
+        if rss.connection_status == "error":
+            issues.append(f"RSS feed last check failed: {rss.last_error}")
+            suggestions.append("Verify the Mikan/RSS source is reachable")
+
+    if not recent_torrents:
+        issues.append("No torrents have been downloaded for this subscription")
+        suggestions.append("Check filter settings or trigger a manual RSS refresh")
+
+    return {
+        "id": bangumi_id,
+        "title": bangumi.official_title,
+        "active": bangumi.added and not bangumi.deleted and not bangumi.archived,
+        "healthy": len(issues) == 0,
+        "issues": issues,
+        "suggestions": suggestions,
+        "torrent_count": len(recent_torrents) if recent_torrents else 0,
+    }
